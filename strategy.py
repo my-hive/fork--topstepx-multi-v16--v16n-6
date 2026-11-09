@@ -1,8 +1,9 @@
-"""ES morning exposure follows completed FX overnight risk signal."""
+"""Market-neutral ES/NQ relative-return dislocation reversion."""
 import numpy as np
+import pandas as pd
 
-FAMILY = "equity-fx-risk-barometer"
-PARAMS = {"entry_ct": 30660, "exit_ct": 36000, "risk": 250}
+FAMILY = "equity-index-pair-dispersion"
+PARAMS = {"lookback": 60, "threshold": 0.004, "start_ct": 34200, "end_ct": 50400, "risk": 250}
 
 
 def entry_risk(panel):
@@ -11,11 +12,14 @@ def entry_risk(panel):
 
 def signals(panel):
     out = {s: np.zeros(len(d), dtype=np.int64) for s, d in panel.items()}
-    if "ES" not in panel or "6E" not in panel:
+    if "ES" not in panel or "NQ" not in panel:
         return out
-    es, fx = panel["ES"], panel["6E"]
-    fx_open = fx.open.where(fx.ct_sec == 17 * 3600).groupby(fx.session).transform("first")
-    fx_sig = -np.sign((fx.close / fx_open - 1).reindex(es.index).ffill()).fillna(0).astype(np.int64)
-    active = (es.ct_sec >= PARAMS["entry_ct"]) & (es.ct_sec < PARAMS["exit_ct"])
-    out["ES"] = np.where(active, fx_sig, 0)
+    es, nq = panel["ES"], panel["NQ"]
+    spread = es.close.pct_change(PARAMS["lookback"]) - nq.close.pct_change(PARAMS["lookback"]).reindex(es.index)
+    side = np.sign(spread.fillna(0)).astype(np.int64)
+    active = pd.Series((es.ct_sec >= PARAMS["start_ct"]) & (es.ct_sec < PARAMS["end_ct"]) & (spread.abs() > PARAMS["threshold"]), index=es.index)
+    out["ES"] = np.where(active, -side, 0)
+    a = active.reindex(nq.index, fill_value=False).to_numpy()
+    sd = pd.Series(side, index=es.index).reindex(nq.index).fillna(0).astype(np.int64).to_numpy()
+    out["NQ"] = np.where(a, sd, 0)
     return out
