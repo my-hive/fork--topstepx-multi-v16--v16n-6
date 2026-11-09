@@ -1,25 +1,40 @@
-"""Market-neutral ES/NQ relative-return dislocation reversion."""
+"""Opening-range breakout on 30-minute RTH range, stop at opposite range side."""
 import numpy as np
 import pandas as pd
 
-FAMILY = "equity-index-pair-dispersion"
-PARAMS = {"lookback": 60, "threshold": 0.004, "start_ct": 34200, "end_ct": 50400, "risk": 250}
+FAMILY = "opening-range-breakout"
+PARAMS = {"or_end_ct": 36000, "entry_cutoff_ct": 52200, "max_width": 6.0, "min_width": 2.0, "risk": 300}
 
 
 def entry_risk(panel):
-    return {s: np.full(len(d), PARAMS["risk"], dtype=float) for s, d in panel.items()}
+    out = {}
+    for s, d in panel.items():
+        risk = np.zeros(len(d))
+        hi = d.high.where((d.ct_sec >= 34200) & (d.ct_sec < PARAMS["or_end_ct"]))
+        lo = d.low.where((d.ct_sec >= 34200) & (d.ct_sec < PARAMS["or_end_ct"]))
+        w = (hi.groupby(d.session).transform("max") - lo.groupby(d.session).transform("min")) * 50.0
+        risk[:] = np.clip(w.fillna(0).to_numpy(), 0, PARAMS["risk"])
+        out[s] = risk
+    return out
 
 
 def signals(panel):
     out = {s: np.zeros(len(d), dtype=np.int64) for s, d in panel.items()}
-    if "ES" not in panel or "NQ" not in panel:
+    if "ES" not in panel:
         return out
-    es, nq = panel["ES"], panel["NQ"]
-    spread = es.close.pct_change(PARAMS["lookback"]) - nq.close.pct_change(PARAMS["lookback"]).reindex(es.index)
-    side = np.sign(spread.fillna(0)).astype(np.int64)
-    active = pd.Series((es.ct_sec >= PARAMS["start_ct"]) & (es.ct_sec < PARAMS["end_ct"]) & (spread.abs() > PARAMS["threshold"]), index=es.index)
-    out["ES"] = np.where(active, -side, 0)
-    a = active.reindex(nq.index, fill_value=False).to_numpy()
-    sd = pd.Series(side, index=es.index).reindex(nq.index).fillna(0).astype(np.int64).to_numpy()
-    out["NQ"] = np.where(a, sd, 0)
+    es = panel["ES"]
+    hi = es.high.where((es.ct_sec >= 34200) & (es.ct_sec < PARAMS["or_end_ct"]))
+    lo = es.low.where((es.ct_sec >= 34200) & (es.ct_sec < PARAMS["or_end_ct"]))
+    orh = hi.groupby(es.session).transform("max")
+    orl = lo.groupby(es.session).transform("min")
+    width = orh - orl
+    tradable = (width >= PARAMS["min_width"]) & (width <= PARAMS["max_width"])
+    c = es.close
+    up = ((c > orh) & (c.shift(1) <= orh)).fillna(False)
+    dn = ((c < orl) & (c.shift(1) >= orl)).fillna(False)
+    ev = (up.astype(np.int64) - dn.astype(np.int64)).groupby(es.session).cumsum().clip(-1, 1)
+    active = (es.ct_sec >= PARAMS["or_end_ct"]) & (es.ct_sec < PARAMS["entry_cutoff_ct"])
+    pos = np.where(active & tradable, ev, 0)
+    pos = pd.Series(pos, index=es.index).groupby(es.session).ffill().fillna(0).astype(np.int64)
+    out["ES"] = pos.to_numpy()
     return out
